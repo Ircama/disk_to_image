@@ -50,3 +50,11 @@ Examples:
   # Read Disk 2 without verification:
   .\disk_to_image.ps1 2 "C:\save\to\imagine.bin" -NoVerify
 ```
+
+Other examples:
+
+```powershell
+disk_to_image.ps1 -DiskNumber 2 -Destination k:\image.bin -UsePartitions -FirstPartition 0 -LastPartition 4 -Force -NoVerify
+
+disk_to_image.ps1 -DiskNumber 2 -Destination k:\image.bin -UsePartitions -FirstPartition 0 -LastPartition 4 -Force -OnlyVerify
+```
