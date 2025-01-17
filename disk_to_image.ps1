@@ -183,6 +183,9 @@ Optional Parameters:
   -help               Show this help message.
 
 Examples:
+  # Run the command interactively for full disk copy
+  .\disk_to_image.ps1
+
   # Read Disk 2 and output to C:\save\to\imagine.bin with default settings:
   .\disk_to_image.ps1 -DiskNumber 2 -Destination "C:\save\to\imagine.bin"
 
@@ -195,6 +198,37 @@ Examples:
 
 "@ -ForegroundColor Cyan
     exit 2
+}
+
+# Check if the script is running with administrative privileges
+if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Host "The script is not running as administrator. Restarting with elevated privileges..."
+    
+    # Reconstruct the original command with all parameters
+    $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" "
+    
+    # Add all the original parameters and their values
+    $arguments += $MyInvocation.BoundParameters.GetEnumerator() | ForEach-Object {
+        $value = if ($_.Value -is [switch]) {
+            "-$($_.Key)"
+        } else {
+            "-$($_.Key) `"$($_.Value)`""
+        }
+        $value
+    }
+    
+    try {
+        $process = Start-Process powershell -ArgumentList $arguments -Verb RunAs -Wait -PassThru
+        if ($process.ExitCode -ne 0) {
+            Write-Host "Administrative privileges are required. Terminating."
+            exit 1
+        }
+    }
+    catch {
+        Write-Host "Administrative privileges are required. Script will now exit."
+        exit 1
+    }
+    exit 0
 }
 
 # Convert BufferSize string (e.g., "10MB", "1KB", "100G") into bytes
@@ -275,8 +309,15 @@ if ($DiskNumber -match '^\d+$') {
     }
 }
 
+# If no arguments are provided, prompt for UsePartitions
+if ($MyInvocation.BoundParameters.Count -eq 0) {
+    Write-Host "`nDo you want to use partitions? (y/n): " -NoNewLine -ForegroundColor Green
+    $response = Read-Host
+    $UsePartitions = $response.ToLower() -eq 'y'
+}
+
 $disk = Get-Disk -Number $DiskNumber
-$partitions = Get-Partition -DiskNumber $DiskNumber | Sort-Object -Property OffsetInBytes
+$partitions = Get-Partition -DiskNumber $DiskNumber
 
 # Initialize variables
 [long]$startOffset = 0
@@ -287,7 +328,7 @@ if ($UsePartitions) {
 
     if ((-not $PSBoundParameters.ContainsKey('FirstPartition')) -or (-not $PSBoundParameters.ContainsKey('LastPartition'))) {
         Write-Host "`nAvailable partitions:" -ForegroundColor Green
-        $partitions | Format-Table -Property PartitionNumber, Type, Size, Offset, DriveLetter
+        $partitions | Format-Table -Property PartitionNumber, Type, Size, @{ Name='GB'; Expression={ '{0:N2} GB' -f ($_.Size / 1gb) } }, Offset, @{ Name='GB'; Expression={ '{0:N2} GB' -f ($_.Offset / 1gb) } }, DriveLetter
     }
 
     # If not provided as parameters, ask for partition range
