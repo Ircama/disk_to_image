@@ -398,10 +398,14 @@ if (-not $Destination) {
 # Extract the directory path from the full destination path
 $directory = Split-Path -Path $Destination -Parent
 
-# Check if the directory exists
+# Check if the destination directory exists
+if (-not $directory) {
+    Write-Host "`nUse full pathname of the destination image file for safer operation.`n" -ForegroundColor Red
+    exit 1
+}
 if (-not (Test-Path -Path $directory)) {
     Write-Host "`nThe destination directory is invalid: $directory`n" -ForegroundColor Red
-    exit 1  # Exit the script if the directory does not exist
+    exit 1
 }
 
 if ((-not $Force) -and (-not $OnlyVerify) -and (Test-Path -Path $Destination)) {
