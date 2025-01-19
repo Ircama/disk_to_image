@@ -212,3 +212,7 @@ Examples:
   # Read Disk 2 without verification:
   .\disk_to_image.ps1 2 "C:\save\to\imagine.bin" -NoVerify
 ```
+
+## Writing a raw disk image to the physical devices
+
+For the inverse process, use [VisualDiskImager](https://github.com/raspopov/VisualDiskImager).
