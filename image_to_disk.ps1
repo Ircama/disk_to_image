@@ -1,22 +1,16 @@
-# Disk_To_Image.ps1
+# Image_To_Disk.ps1
 param(
     [Parameter(Mandatory=$false)]
     [switch]$Help,
 
     [Parameter(Mandatory=$false)]
+    [string]$Source,
+    
+    [Parameter(Mandatory=$false)]
     [string]$DiskNumber,
 
     [Parameter(Mandatory=$false)]
-    [string]$Destination,
-    
-    [Parameter(Mandatory=$false)]
-    [switch]$UsePartitions,
-    
-    [Parameter(Mandatory=$false)]
-    [int]$FirstPartition,
-    
-    [Parameter(Mandatory=$false)]
-    [int]$LastPartition,
+    [int]$Partition,
     
     [Parameter(Mandatory=$false)]
     [string]$BufferSize = "1MB",
@@ -37,7 +31,7 @@ param(
     [int]$RetryVerify = 3,
 
     [Parameter(Mandatory=$false)]
-    [int]$SectorSize = 512,
+    [int]$SectorSize = 1MB,
 
     [Parameter(Mandatory=$false)]
     [switch]$DebugRetryVerify
@@ -46,6 +40,78 @@ param(
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
+
+public class DiskWriterAPI {
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool SetFilePointerEx(
+        IntPtr hFile,
+        long liDistanceToMove,
+        IntPtr lpNewFilePointer,
+        uint dwMoveMethod);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr CreateFile(
+        string lpFileName,
+        int dwDesiredAccess,
+        int dwShareMode,
+        IntPtr lpSecurityAttributes,
+        int dwCreationDisposition,
+        int dwFlagsAndAttributes,
+        IntPtr hTemplateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool DeviceIoControl(
+        IntPtr hDevice,
+        uint dwIoControlCode,
+        IntPtr lpInBuffer,
+        uint nInBufferSize,
+        IntPtr lpOutBuffer,
+        uint nOutBufferSize,
+        ref uint lpBytesReturned,
+        IntPtr lpOverlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool CloseHandle(IntPtr hObject);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool WriteFile(
+        IntPtr hFile,
+        byte[] lpBuffer,
+        uint nNumberOfBytesToWrite,
+        ref uint lpNumberOfBytesWritten,
+        IntPtr lpOverlapped);
+
+    [DllImport("kernel32.dll")]
+    public static extern bool LockFile(
+        IntPtr hFile,
+        uint dwFileOffsetLow,
+        uint dwFileOffsetHigh,
+        uint nNumberOfBytesToLockLow,
+        uint nNumberOfBytesToLockHigh);
+
+    [DllImport("kernel32.dll")]
+    public static extern bool UnlockFile(
+        IntPtr hFile,
+        uint dwFileOffsetLow,
+        uint dwFileOffsetHigh,
+        uint nNumberOfBytesToLockLow,
+        uint nNumberOfBytesToLockHigh);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool ReadFile(
+        IntPtr hFile,
+        byte[] lpBuffer,
+        uint nNumberOfBytesToRead,
+        ref uint lpNumberOfBytesRead,
+        IntPtr lpOverlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern uint SetFilePointer(
+        IntPtr hFile,
+        int lDistanceToMove,
+        IntPtr lpDistanceToMoveHigh,
+        uint dwMoveMethod);
+}
 
 public class VolumeManagement {
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
@@ -139,36 +205,52 @@ function Enable-VolumeMountPoint {
     }
 }
 
+function Disable-Automount {
+    $tempFile = [System.IO.Path]::GetTempFileName()
+    "automount disable" | Out-File -FilePath $tempFile
+    diskpart /s $tempFile | Out-Null
+    Remove-Item $tempFile
+    Write-Host "Automount disabled"
+}
+
+# Function to enable automount
+function Enable-Automount {
+    $tempFile = [System.IO.Path]::GetTempFileName()
+    "automount enable" | Out-File -FilePath $tempFile
+    diskpart /s $tempFile | Out-Null
+    Remove-Item $tempFile
+    Write-Host "Automount enabled"
+}
+
 if ($NoVerify -and $OnlyVerify) {
     Write-Host "`nInvalid parameters. Either -NoVerify or -OnlyVerify.`n" -ForegroundColor Red
     $Help = $true
 }
 
-if ($FirstPartition -or $LastPartition) {
+if ($Partition) {
     $UsePartitions = $true
 }
 
 if ($Help) {
     Write-Host @"
-Usage: disk_to_image.ps1 -DiskNumber <string> -Destination <string> [options]
+Usage: image_to_disk.ps1 -Source <string> -DiskNumber <string> [options]
 
 Description:
-  Copy disk to file image.
+  Copy file image to disk.
 
-  This script reads disk data writing an image file, allowing you to specify
-  partitions, buffer size, and verification options.
+  This script reads an image file and writes data to disk, allowing you to
+   specify whether the entire disk will be written, or only specific partitions.
+   It also allows setting options like buffer size and whether to perform
+   verification.
 
 Needed Parameters:
-  -DiskNumber         The number of the disk to process (e.g., "2").
-  -Destination        The destination where data should be written (e.g.,
+  -Source             The source file to be copied to the disk (e.g.,
                       "C:\save\to\imagine.bin").
+  -DiskNumber         The destination number of the disk where the file image
+                      will be copied (e.g., "2").
 
 Optional Parameters:
-  -UsePartitions      Use this switch to enable partition-specific operations.
-  -FirstPartition     Specify the first partition to process (e.g., "1") or use
-                      "0" for for disk start. Requires -UsePartitions.
-  -LastPartition      Specify the last partition to process (e.g., "4").
-                      Default is last partition. Requires -UsePartitions.
+  -Partition          Specify the partition to write (e.g., "1").
   -BufferSize         Specify the buffer size for the operation in MB
                       (default: 1MB).
                       Example: -BufferSize 10MB
@@ -183,18 +265,17 @@ Optional Parameters:
   -help               Show this help message.
 
 Examples:
-  # Run the command interactively for full disk copy
-  .\disk_to_image.ps1
+  # Run the command interactively
+  .\image_to_disk.ps1
 
-  # Read Disk 2 and output to C:\save\to\imagine.bin with default settings:
-  .\disk_to_image.ps1 -DiskNumber 2 -Destination "C:\save\to\imagine.bin"
+  # Write C:\save\to\imagine.bin to Disk 2 with default settings:
+  .\image_to_disk.ps1 -Source "C:\save\to\imagine.bin" -DiskNumber 2
 
-  # Read Disk 2 with partitions 1 to 3 and a 10MB buffer:
-  .\disk_to_image.ps1 2 "C:\save\to\imagine.bin" -UsePartitions `
-                   -FirstPartition 1 -LastPartition 3 -BufferSize 10MB
+  # Write to Disk 2, partitions 1 and a 10MB buffer:
+  .\image_to_disk.ps1 "C:\save\to\imagine.bin" 2 -Partition 1 -BufferSize 10MB
 
-  # Read Disk 2 without verification:
-  .\disk_to_image.ps1 2 "C:\save\to\imagine.bin" -NoVerify
+  # Write to Disk 2 without verification:
+  .\image_to_disk.ps1 "C:\save\to\imagine.bin" 2 -NoVerify
 
 "@ -ForegroundColor Cyan
     exit 2
@@ -249,6 +330,45 @@ if ($BufferSize -match "^(\d+)([KMG])B$") {
     throw "Invalid BufferSize format. Use formats like '1M', '10M', or '512K'."
 }
 
+# Check source file
+if (-not $Source) {
+
+    $Source = $(
+        Write-Host "`nPlease enter the complete file path for the source image: " -NoNewLine -ForegroundColor Green
+        Read-Host
+    )
+    if ($Source -eq '') {
+        Write-Host "`nERROR: Missing source. Use --help for usage information.`n" -ForegroundColor Red
+        exit 1
+    }
+}
+
+# Extract the directory path from the full source path
+$directory = Split-Path -Path $Source -Parent
+
+# Check if the source directory exists
+if (-not $directory) {
+    Write-Host "`nUse full pathname of the source image file for safer operation.`n" -ForegroundColor Red
+    exit 1
+}
+if (-not (Test-Path -Path $directory)) {
+    Write-Host "`nThe source directory is invalid: $directory`n" -ForegroundColor Red
+    exit 1
+}
+
+if (-not [System.IO.File]::Exists($Source)) {
+    Write-Host "`nThe source path does not exist (use full pathnames): $Source`n" -ForegroundColor Red
+    exit 1
+}
+
+# Get sizes
+$imageSize = (Get-Item $Source).Length
+
+if ($imageSize -lt 10) {
+    Write-Host "`nThe source image file is too small: $imageSize bytes.`n" -ForegroundColor Red
+    exit 1
+}
+
 # Function to validate disk number
 function Test-DiskNumber {
     param ([string]$Number)
@@ -256,9 +376,9 @@ function Test-DiskNumber {
     return $null -ne $disk
 }
 
-# If no disk number provided, ask for it
+# If no destination disk number provided, ask for it
 if (-not $DiskNumber) {
-    Write-Host "`nAvailable source disks:" -ForegroundColor Green
+    Write-Host "`nAvailable destination disks:" -ForegroundColor Green
     Get-Disk | Format-Table -AutoSize
     do {
         $DiskNumber = $(
@@ -277,7 +397,7 @@ if (-not $DiskNumber) {
 # Check if DiskNumber is numeric, if not, list all disks and ask user to select
 if ($DiskNumber -match '^\d+$') {
     # If DiskNumber is a number, proceed with the disk number as entered
-    Write-Host "Disk to read/verify: $DiskNumber" -ForegroundColor Cyan
+    Write-Host "Disk to write/verify: $DiskNumber" -ForegroundColor Cyan
 } else {
     # List all available disks
     $disks = Get-WmiObject -Class Win32_DiskDrive | Select-Object DeviceID, MediaType, Model
@@ -323,112 +443,86 @@ if ($MyInvocation.BoundParameters.Count -eq 0) {
 }
 
 $disk = Get-Disk -Number $DiskNumber
-try {
-    $partitions = Get-Partition -DiskNumber $DiskNumber 2>&1 | Out-Null
-} catch {
+$partitions = Get-Partition -DiskNumber 2 -ErrorVariable partitionError -ErrorAction SilentlyContinue
+if (-not $partitions) {
     $partitions = 0
 }
 
-if (-not $partitions) {
-    Write-Host "Error: source disk is empty.`n" -ForegroundColor Red
+if ((-not $partitions -or $partitions -eq 0) -and $UsePartitions) {
+    Write-Host "Error: using partitions while the target disk has no partition.`n" -ForegroundColor Red
     exit 1
 }
 
 # Initialize variables
 [long]$startOffset = 0
 [long]$totalSize = $disk.Size
+[long]$endOffset = $totalSize
 
 if ($UsePartitions) {
     # Display available partitions
 
-    if ((-not $PSBoundParameters.ContainsKey('FirstPartition')) -or (-not $PSBoundParameters.ContainsKey('LastPartition'))) {
+    if (-not $PSBoundParameters.ContainsKey('Partition')) {
         Write-Host "`nAvailable partitions:" -ForegroundColor Green
         $partitions | Format-Table -Property PartitionNumber, Type, Size, @{ Name='GB'; Expression={ '{0:N2} GB' -f ($_.Size / 1gb) } }, Offset, @{ Name='GB'; Expression={ '{0:N2} GB' -f ($_.Offset / 1gb) } }, DriveLetter
     }
 
     # If not provided as parameters, ask for partition range
-    if (-not $PSBoundParameters.ContainsKey('FirstPartition')) {
+    if (-not $PSBoundParameters.ContainsKey('Partition')) {
         $input = $(
-            Write-Host "Enter first partition number (default: 0 for disk start): " -NoNewLine -ForegroundColor Green
+            Write-Host "Enter the partition number to use: " -NoNewLine -ForegroundColor Green
             Read-Host
         )
         if ($input -ne '') {
-            $FirstPartition = [int]$input
+            $Partition = [int]$input
         }
     }
 
-    if (-not $PSBoundParameters.ContainsKey('LastPartition')) {
-        $input = $(
-            Write-Host "Enter last partition number (default: full disk): " -NoNewLine -ForegroundColor Green
-            Read-Host
-        )
-        if ($input -ne '') {
-            $LastPartition = [int]$input
-        }
+    if ($Partition -eq 0) {
+        Write-Host "Invalid partition $Partition.`n" -ForegroundColor Red
+        exit 1
     }
 
-    # Calculate start offset and size based on partitions
-    if ($FirstPartition) {
-        $firstPart = $partitions | Where-Object { $_.PartitionNumber -eq $FirstPartition }
-        if ($firstPart) {
-            [long]$startOffset = $firstPart.Offset
-        } else {
-            Write-Host "`nAvailable partitions:" -ForegroundColor Green
-            $partitions | Format-Table -Property PartitionNumber, Type, Size, Offset, DriveLetter
-            Write-Host "Invalid first partition $FirstPartition.`n" -ForegroundColor Red
-            exit 1
-        }
-    }
-
-    if ($LastPartition) {
-        $lastPart = $partitions | Where-Object { $_.PartitionNumber -eq $LastPartition }
-        if ($lastPart) {
-            [long]$endOffset = $lastPart.Offset + $lastPart.Size
+    # Calculate start offset based on partition
+    if ($Partition) {
+        $Part = $partitions | Where-Object { $_.PartitionNumber -eq $Partition }
+        if ($Part) {
+            [long]$startOffset = $Part.Offset
+            [long]$endOffset = $Part.Offset + $Part.Size
             [long]$totalSize = $endOffset - $startOffset
         } else {
             Write-Host "`nAvailable partitions:" -ForegroundColor Green
             $partitions | Format-Table -Property PartitionNumber, Type, Size, Offset, DriveLetter
-            Write-Host "Invalid last partition $LastPartition.`n" -ForegroundColor Red
+            Write-Host "Invalid partition $Partition.`n" -ForegroundColor Red
             exit 1
         }
     }
-}
 
-# Get the device path for the disk
-$source = "\\.\PhysicalDrive$DiskNumber"
-
-# Check destination image file
-if (-not $Destination) {
-
-    $Destination = $(
-        Write-Host "`nPlease enter the complete file path for the destination image: " -NoNewLine -ForegroundColor Green
-        Read-Host
-    )
-    if ($Destination -eq '') {
-        Write-Host "`nERROR: Missing destination. Use --help for usage information.`n" -ForegroundColor Red
+    if ($totalSize -lt $imageSize) {
+        Write-Host "Error. Selected partition size ($totalSize bytes = $([math]::Round($totalSize/1GB, 2)) GB) is less than the source image file size ($imageSize bytes = $([math]::Round($imageSize/1GB, 2)) GB).`n" -ForegroundColor Red
+        exit 1
+    }
+} else {
+    if ($totalSize -lt $imageSize) {
+        Write-Host "Error. Selected disk size ($totalSize bytes = $([math]::Round($totalSize/1GB, 2)) GB) is less than the sorce image file size ($imageSize bytes = $([math]::Round($imageSize/1GB, 2)) GB).`n" -ForegroundColor Red
         exit 1
     }
 }
 
-# Extract the directory path from the full destination path
-$directory = Split-Path -Path $Destination -Parent
+# Get the device path for the destination disk
+$destination_disk = "\\.\PhysicalDrive$DiskNumber"
 
-# Check if the destination directory exists
-if (-not $directory) {
-    Write-Host "`nUse full pathname of the destination image file for safer operation.`n" -ForegroundColor Red
-    exit 1
-}
-if (-not (Test-Path -Path $directory)) {
-    Write-Host "`nThe destination directory is invalid: $directory`n" -ForegroundColor Red
-    exit 1
-}
+if ((-not $Force) -and (-not $OnlyVerify)) {
+    Write-Host "`nWARNING: This will OVERWRITE disk $DiskNumber ($($disk.FriendlyName))" -ForegroundColor Green
+    Write-Host "Image size to read: $([math]::Round($imageSize/1GB, 2)) GB" -ForegroundColor Green
+    Write-Host "Disk size to write: $([math]::Round($totalSize/1GB, 2)) GB" -ForegroundColor Green
+    if ($startOffset -gt 0) {
+        Write-Host "Use partition. Disk offset: $startOffset bytes ($([math]::Round($startOffset/1GB, 2)) GB)" -ForegroundColor Green    
+    } else {
+        Write-Host "Copy full disk." -ForegroundColor Green    
+    }
 
-if ((-not $Force) -and (-not $OnlyVerify) -and (Test-Path -Path $Destination)) {
-    Write-Host "`nPath " -NoNewline -ForegroundColor Green
-    Write-Host "$Destination" -ForegroundColor Yellow -NoNewline
-    Write-Host " already exists." -ForegroundColor Green
     $confirmation = $(
-        Write-Host "`nPlease confirm overwriting (Y/N): " -NoNewLine -ForegroundColor Green
+        Write-Host "`nAre you sure you want to proceed? (Y/N): " -NoNewLine -ForegroundColor Green
         Read-Host
     )
     if ($confirmation -ne 'Y') {
@@ -438,110 +532,199 @@ if ((-not $Force) -and (-not $OnlyVerify) -and (Test-Path -Path $Destination)) {
 }
 
 $buffer = New-Object byte[]($BufferSize)
-[long]$totalBytesRead = 0
+[long]$totalBytesWritten = 0
 $disabledPoints = @()  # Initialize an array to hold the disabled mount points
 
 # Dismount volumes
-try {
-    $volumes = Get-Partition -DiskNumber $DiskNumber | Get-Volume
-    if (-not $volumes) {
-        Write-Host "No volumes found on disk $DiskNumber" -ForegroundColor Red
+if ($partitions) {
+    try {
+        $volumes = Get-Partition -DiskNumber $DiskNumber | Get-Volume
+        if (-not $volumes) {
+            Write-Host "No volumes found on disk $DiskNumber" -ForegroundColor Red
+            exit 1
+        }
+        Write-Host "Trying to dismount volumes on disk $DiskNumber..." -ForegroundColor Cyan
+        foreach ($volume in $volumes) {
+            if ($volume.DriveLetter) {
+                $disabledPoints += Disable-VolumeMountPoint -Volume $volume -DriveLetter $volume.DriveLetter -Force $Force
+            }
+        }
+    } catch {
+        Write-Host "`nAn error occurred while dismounting volumes: $_`n" -ForegroundColor Red
         exit 1
     }
-    Write-Host "Trying to dismount volumes on disk $DiskNumber..." -ForegroundColor Cyan
-    foreach ($volume in $volumes) {
-        if ($volume.DriveLetter) {
-            $disabledPoints += Disable-VolumeMountPoint -Volume $volume -DriveLetter $volume.DriveLetter -Force $Force
-        }
-    }
-} catch {
-    Write-Host "`nAn error occurred while dismounting volumes: $_`n" -ForegroundColor Red
-    exit 1
 }
 
-# Skip to partition offset
-$CopyLabel = "Copy"
-$CopyingLabel = "Copying"
-if ($OnlyVerify) {
-    $CopyLabel = "Verify"
-    $CopyingLabel = "Verifying"
-}
-if ($startOffset -gt 0) {
-    $srcStream.Seek($startOffset, [System.IO.SeekOrigin]::Begin) | Out-Null
-    Write-Host "Offset: $startOffset bytes ($([math]::Round($startOffset / 1GB, 2)) GB)" -ForegroundColor Cyan
-    Write-Host "$CopyLabel size: $totalSize bytes ($([math]::Round($totalSize / 1GB, 2)) GB)" -ForegroundColor Cyan
-} else {
-    Write-Host "$CopyingLabel $totalSize bytes ($([math]::Round($totalSize / 1GB, 2)) GB) from the start of the disk." -ForegroundColor Cyan
-}
-if (-not $Force) {
-    $confirmation = $(
-        Write-Host "`nConfirm the above parameters (Y/N): " -NoNewLine -ForegroundColor Green
-        Read-Host
-    )
-    if ($confirmation -eq 'Y') {
-        Write-Host "Disk selected: $DiskNumber" -ForegroundColor Cyan
-    } else {
-        Write-Host "`nSelection canceled. Exiting script.`n" -ForegroundColor Yellow
-        exit 1
-    }
-}
+# Constants
+$GENERIC_READ = 0x80000000
+$GENERIC_WRITE = 0x40000000
+$FILE_SHARE_READ = 0x1
+$FILE_SHARE_WRITE = 0x2
+$OPEN_EXISTING = 3
+$INVALID_HANDLE_VALUE = -1
+$FSCTL_LOCK_VOLUME = 0x00090018
+$FSCTL_UNLOCK_VOLUME = 0x0009001c
+$FSCTL_DISMOUNT_VOLUME = 0x00090020
 
 if (-not $OnlyVerify) {
-    Write-Host "Creating disk image..." -ForegroundColor Cyan
-    [Console]::Out.Flush()
-
-    # Open streams for reading and writing
     try {
+        $dotCount = 0
+        [long]$bytesReturned = 0u
+        $success = $false
+
+        #Disable-Automount
+
+        # Clear disk to ensure clean state
+        if (-not $partitions) {
+            Clear-Disk -Number $DiskNumber -RemoveData -RemoveOEM -Confirm: (-not $Force)
+        }
+
+        # Open source file
         $srcStream = [System.IO.File]::OpenRead($source)
-    } catch {
-        Write-Host "`nError: The source disk cannot be read." -ForegroundColor Red
-        Write-Host "`nDetails: $_`n" -ForegroundColor Red
-        exit 1
-    }
 
-    try {
-        $destStream = [System.IO.File]::Create($Destination)
-    } catch {
-        Write-Host "`nError: The destination file is busy or the stream is invalid." -ForegroundColor Red
-        Write-Host "`nDetails: $_`n" -ForegroundColor Red
-        exit 1
-    }
+        # Open the physical drive
+        $handle = [DiskWriterAPI]::CreateFile($destination_disk, 
+            $GENERIC_READ -bor $GENERIC_WRITE,
+            $FILE_SHARE_READ -bor $FILE_SHARE_WRITE,
+            [IntPtr]::Zero,
+            $OPEN_EXISTING,
+            0,
+            [IntPtr]::Zero)
 
-    # Copy the disk
-    $dotCount = 0
-    $interruptOccurred = $true
-    try {
-        while ([long]$totalBytesRead -lt [long]$totalSize) {
-            [long]$remainingBytes = [long]$totalSize - [long]$totalBytesRead
-            [long]$readSize = [Math]::Min([long]$BufferSize, [long]$remainingBytes)
-            
-            [long]$bytesRead = $srcStream.Read($buffer, 0, [long]$readSize)
-            
-            if ($bytesRead -eq 0) { break }
-            
-            try {
-                $destStream.Write($buffer, 0, $bytesRead)
-            } catch {
-                Write-Host "`nError: The destination file is busy or the stream is invalid.`n" -ForegroundColor Red
+        if ($handle -eq $INVALID_HANDLE_VALUE) {
+            throw "Failed to open disk. Error code: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+        }
+
+        # Skip to partition offset
+        if ($startOffset -gt 0) {
+
+            #$totalBytesWritten = $startOffset
+            #$srcStream.Seek($startOffset, [System.IO.SeekOrigin]::Begin) | Out-Null
+
+            $seekSuccess = [DiskWriterAPI]::SetFilePointerEx(
+                $handle,
+                $startOffset,
+                [IntPtr]::Zero,
+                $FILE_BEGIN)
+
+            Write-Host "Offset: $startOffset bytes ($([math]::Round($startOffset / 1GB, 2)) GB)" -ForegroundColor Cyan
+            Write-Host "Copy size: $imageSize bytes ($([math]::Round($imageSize / 1GB, 2)) GB)" -ForegroundColor Cyan
+        } else {
+            Write-Host "Copying $imageSize bytes ($([math]::Round($imageSize / 1GB, 2)) GB) from the start of the disk." -ForegroundColor Cyan
+        }
+        if (-not $Force) {
+            $confirmation = $(
+                Write-Host "`nConfirm the above parameters (Y/N): " -NoNewLine -ForegroundColor Green
+                Read-Host
+            )
+            if ($confirmation -eq 'Y') {
+                Write-Host "Disk selected: $DiskNumber" -ForegroundColor Cyan
+            } else {
+                Write-Host "`nSelection canceled. Exiting script.`n" -ForegroundColor Yellow
                 exit 1
             }
+        }
 
-            $totalBytesRead += $bytesRead
+        $DoLock = $false
+        if ($DoLock) {
+            # Lock and dismount the volume
+            Write-Host "Locking and dismounting volume..."
+            $success = [DiskWriterAPI]::DeviceIoControl(
+                $handle,
+                $FSCTL_LOCK_VOLUME,
+                [IntPtr]::Zero,
+                0,
+                [IntPtr]::Zero,
+                0,
+                [ref]$bytesReturned,
+                [IntPtr]::Zero)
+
+            if (-not $success) {
+                throw "Failed to lock volume. Error code: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+            }
+
+            $success = [DiskWriterAPI]::DeviceIoControl(
+                $handle,
+                $FSCTL_DISMOUNT_VOLUME,
+                [IntPtr]::Zero,
+                0,
+                [IntPtr]::Zero,
+                0,
+                [ref]$bytesReturned,
+                [IntPtr]::Zero)
+
+            if (-not $success) {
+                throw "Failed to dismount volume. Error code: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+            }
+        }
+
+        # Copy the image to disk
+        Write-Host "Writing disk image..."
+        [Console]::Out.Flush()
+
+        while ($totalBytesWritten -lt $imageSize) {
+            $remainingBytes = $imageSize - $totalBytesWritten
+            $readSize = [Math]::Min([long]$bufferSize, [long]$remainingBytes)
+            
+            # Read the data first
+            $bytesRead = $srcStream.Read($buffer, 0, $readSize)
+            if ($bytesRead -eq 0) { break }
+
+            # Always ensure the write size is aligned to 512 bytes
+            [long]$alignedSize = $bytesRead
+            if ($alignedSize % 512 -ne 0) {
+                $alignedSize += (512 - ($alignedSize % 512))
+            }
+            
+            # If we need to align, create a new padded buffer
+            if ($alignedSize -ne $bytesRead) {
+                [long]$alignedBuffer = New-Object byte[]($alignedSize)
+                [Array]::Copy($buffer, $alignedBuffer, $bytesRead)
+                # Zero out the padding bytes
+                for ($i = $bytesRead; $i -lt $alignedSize; $i++) {
+                    $alignedBuffer[$i] = 0
+                }
+                $buffer = $alignedBuffer
+            }
+
+            [long]$bytesWritten = 0u
+            $success = [DiskWriterAPI]::WriteFile(
+                $handle,
+                $buffer,
+                [uint32]$alignedSize,
+                [ref]$bytesWritten,
+                [IntPtr]::Zero)
+
+            if (-not $success) {
+                $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                throw "`nFailed to write $alignedSize bytes to disk at offset $totalBytesWritten. Attempted to write $alignedSize bytes. Error code: $lastError"
+            }
+
+            if ($bytesWritten -ne $alignedSize) {
+                throw "`nWrite size mismatch. Wrote $bytesWritten of $alignedSize bytes at offset $totalBytesWritten"
+            }
+
+            # Only count the actual bytes we read from the source, not the padding
+            $totalBytesWritten += $bytesRead
             Write-Host "." -NoNewline
             $dotCount++
             
             if ($dotCount -ge 80) {
-                $percentage = ([long]$totalBytesRead / [long]$totalSize) * 100
+                $percentage = ([long]$totalBytesWritten / [long]$imageSize) * 100
                 Write-Host "`r $([math]::Round($percentage, 1))% " -NoNewline
-                $dotCount = 0  # Reset counter
+                $dotCount = 0
                 [Console]::Out.Flush()
             }
         }
-        $interruptOccurred = $false
+        if ($dotCount -ne 0) {
+            Write-Host ""
+        }
+    }
+    catch {
+        Write-Host "Error: $_"
+        #Write-Host "Last Win32 Error: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     } finally {
         # Ensure that the destination stream is closed and the file is released
-        $destStream.Close()
-        $destStream.Dispose()
         $srcStream.Close()
         if ($interruptOccurred) {
             if ($disabledPoints) {
@@ -553,8 +736,8 @@ if (-not $OnlyVerify) {
             Write-Host "`r Completed "
         }
     }
-
-    Write-Host "Disk image created successfully!" -ForegroundColor Cyan
+    Write-Host "`nDisk restore completed successfully!" -ForegroundColor Cyan
+    Write-Host "Bytes written: $totalBytesWritten" -ForegroundColor Cyan
     [Console]::Out.Flush()
 }
 
@@ -576,9 +759,9 @@ try {
     exit 1
 }
 try {
-    $fs2 = [System.IO.File]::OpenRead($Destination)
+    $fs2 = [System.IO.File]::OpenRead($Source)
 } catch {
-    Write-Host "`nError: The destination file is busy or the stream is invalid." -ForegroundColor Red
+    Write-Host "`nError: The image source file is busy or the stream is invalid." -ForegroundColor Red
     Write-Host "`nDetails: $_`n" -ForegroundColor Red
     exit 1
 }
@@ -601,14 +784,14 @@ if ($OffsetVerify -gt 0) {
 $interruptOccurred = $true
 $retry = 0
 try {
-    while ([long]$totalBytesRead -lt [long]$totalSize -and $equal) {
+    while ([long]$totalBytesRead -lt [long]$imageSize -and $equal) {
         if ($retry -gt $RetryVerify) {
             $equal = $false
             Write-Host "`nDifferent data content at offset $totalBytesRead ($([math]::Round($totalBytesRead / 1GB, 2)) GB)." -ForegroundColor Red
             break
         }
         if ($retry -eq 0) {
-            [long]$remainingBytes = [long]$totalSize - [long]$totalBytesRead
+            [long]$remainingBytes = [long]$imageSize - [long]$totalBytesRead
             $readSize = [Math]::Min([long]$BufferSize, [long]$remainingBytes)
         }
         
@@ -639,7 +822,7 @@ try {
         $dotCount++
         
         if ($dotCount -ge 80) {
-            $percentage = ([long]$totalBytesRead / [long]$totalSize) * 100
+            $percentage = ([long]$totalBytesRead / [long]$imageSize) * 100
             Write-Host "`r $([math]::Round($percentage, 1))% " -NoNewline
             $dotCount = 0
             [Console]::Out.Flush()
