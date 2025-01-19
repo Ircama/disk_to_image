@@ -216,3 +216,19 @@ Examples:
 ## Writing a raw disk image to the physical devices
 
 For the inverse process, use [VisualDiskImager](https://github.com/raspopov/VisualDiskImager).
+
+## Mounting copied images with WSL
+
+To mount the partition(s) included in a disk image via WSL:
+
+```bash
+sudo losetup -fP --show /mnt/c/path/to/disk.img
+
+lsblk /dev/loop0
+```
+
+Check the appropriate partition to mount (e.g., 1):
+
+```bash
+sudo mount /dev/loop0p1 /mnt
+```
