@@ -34,7 +34,7 @@ param(
     [long]$OffsetVerify = 0,
 
     [Parameter(Mandatory=$false)]
-    [int]$RetryVerify = 20,
+    [int]$RetryVerify = 3,
 
     [Parameter(Mandatory=$false)]
     [int]$SectorSize = 512,
@@ -175,10 +175,10 @@ Optional Parameters:
   -NoVerify           Skip verification step (default is to verify)
   -Force              Do not ask any confirmation
   -OnlyVerify         Only perform the verification process, without copying
-  -OffsetVerify       Start verification from given offset (
+  -OffsetVerify       Start verification from given offset
   -DebugRetryVerify   Write debug information when verify temporarily fails
   -RetryVerify        Number of verification retries of reading a sector
-                      before showing error (default: 20)
+                      before showing error (default: 3)
   -SectorSize         Sector size in bytes (default is 512 bytes)
   -help               Show this help message.
 
